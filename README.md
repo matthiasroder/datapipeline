@@ -5,6 +5,7 @@ A Python tool that converts various document formats to a combined Markdown file
 ## Features
 
 - Processes PDF, DOCX, TXT, HTML, and CSV files
+- Downloads and converts web pages directly from URLs
 - Converts all formats to Markdown while preserving structure
 - Adds metadata and tags as YAML front matter
 - Optionally generates summaries using OpenAI API
@@ -41,8 +42,18 @@ python pipeline.py --summary --model gpt-4 --length 200
 # Customize output file
 python pipeline.py --output combined_docs.md
 
+# Process a website directly
+python pipeline.py --url example.com --output website.md
+
+# Process website with summary
+python pipeline.py --url example.com --summary --model gpt-4 --output website.md
+
+# Process files from a specific directory
+python pipeline.py --input-dir /path/to/documents --output docs.md
+
 # All options combined
-python pipeline.py --metadata "author=Jane Doe" "project=Research" \
+python pipeline.py --input-dir /path/to/documents \
+                 --metadata "author=Jane Doe" "project=Research" \
                  --tags research documentation reference \
                  --summary --model gpt-3.5-turbo --length 150 \
                  --output combined_docs.md

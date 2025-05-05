@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+import urllib.parse
 from typing import Dict, List, Optional, Tuple, Any
 
 # Setup logging
@@ -29,7 +30,8 @@ DEPENDENCIES = {
     "docx": False,
     "html": False,
     "csv": False,
-    "openai": False
+    "openai": False,
+    "requests": False
 }
 
 try:
@@ -62,6 +64,12 @@ try:
     DEPENDENCIES["openai"] = True
 except ImportError:
     logger.warning("openai not installed. Summary generation will be disabled.")
+
+try:
+    import requests
+    DEPENDENCIES["requests"] = True
+except ImportError:
+    logger.warning("requests not installed. Web fetching will be disabled.")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -100,22 +108,44 @@ def parse_arguments() -> argparse.Namespace:
         default="combined_output.md",
         help="Output filename (default: combined_output.md)"
     )
+    parser.add_argument(
+        "--input-dir",
+        default=".",
+        help="Directory containing files to process (default: current directory)"
+    )
+    parser.add_argument(
+        "--url",
+        help="URL to download and convert to Markdown"
+    )
     return parser.parse_args()
 
 
-def find_files() -> Dict[str, List[str]]:
+def find_files(input_dir: str = ".") -> Dict[str, List[str]]:
     """
-    Find files in the current directory by extension.
+    Find files in the specified directory by extension.
     
+    Args:
+        input_dir: Directory to search for files
+        
     Returns:
         Dict mapping file extensions to lists of matching filenames
     """
+    # Convert relative to absolute path if needed
+    input_dir = os.path.abspath(input_dir)
+    
+    if not os.path.isdir(input_dir):
+        logger.error(f"Input directory does not exist: {input_dir}")
+        return {ext: [] for ext in ["pdf", "docx", "txt", "html", "csv"]}
+    
+    logger.info(f"Searching for files in: {input_dir}")
+    
+    # Build search patterns with directory path
     extensions = {
-        "pdf": glob.glob("*.pdf"),
-        "docx": glob.glob("*.docx"),
-        "txt": glob.glob("*.txt"),
-        "html": glob.glob("*.html") + glob.glob("*.htm"),
-        "csv": glob.glob("*.csv")
+        "pdf": glob.glob(os.path.join(input_dir, "*.pdf")),
+        "docx": glob.glob(os.path.join(input_dir, "*.docx")),
+        "txt": glob.glob(os.path.join(input_dir, "*.txt")),
+        "html": glob.glob(os.path.join(input_dir, "*.html")) + glob.glob(os.path.join(input_dir, "*.htm")),
+        "csv": glob.glob(os.path.join(input_dir, "*.csv"))
     }
     
     # Log what we found
@@ -281,6 +311,56 @@ def convert_csv(filepath: str) -> str:
         return f"*Error: Failed to process CSV file: {str(e)}*\n\n"
 
 
+def fetch_url(url: str) -> Tuple[str, str]:
+    """
+    Fetch content from a URL and convert it to markdown.
+    
+    Args:
+        url: URL to fetch
+        
+    Returns:
+        Tuple of (title, markdown_content)
+    """
+    if not DEPENDENCIES["requests"] or not DEPENDENCIES["html"]:
+        error_msg = "*Error: Cannot fetch URL. Please install requests and beautifulsoup4/markdownify.*"
+        return "URL Fetch Failed", error_msg
+    
+    try:
+        # Add scheme if not present
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        # Make the request
+        logger.info(f"Fetching URL: {url}")
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        # Parse the HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extract title
+        title = soup.title.string if soup.title else urllib.parse.urlparse(url).netloc
+        
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.extract()
+        
+        # Convert to markdown
+        markdown_content = md(str(soup))
+        
+        # Add URL reference
+        markdown_content = f"*Source: [{url}]({url})*\n\n{markdown_content}"
+        
+        return title, markdown_content
+    
+    except Exception as e:
+        logger.error(f"Error fetching URL {url}: {str(e)}")
+        return "URL Fetch Failed", f"*Error: Failed to fetch URL: {str(e)}*\n\n"
+
+
 def generate_summary(text: str, model: str, max_length: int) -> str:
     """
     Generate a summary of the text using OpenAI API.
@@ -412,6 +492,61 @@ def generate_yaml_frontmatter(metadata: Dict[str, str], tags: Optional[List[str]
     return "\n".join(frontmatter) + "\n\n"
 
 
+def process_url_to_markdown(url: str, output_file: str, metadata: Dict[str, str], 
+                           tags: Optional[List[str]], enable_summary: bool, 
+                           model: str, max_length: int) -> int:
+    """
+    Process a URL directly to a markdown file.
+    
+    Args:
+        url: URL to process
+        output_file: Output file path
+        metadata: Dictionary of metadata
+        tags: List of tags
+        enable_summary: Whether to generate a summary
+        model: OpenAI model to use
+        max_length: Maximum summary length
+        
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    # Fetch the URL
+    title, content = fetch_url(url)
+    
+    if content.startswith("*Error:"):
+        logger.error(f"Failed to process URL: {url}")
+        return 1
+    
+    # Update metadata with title and URL
+    metadata["title"] = title
+    metadata["source_url"] = url
+    
+    # Start generating output
+    output_parts = []
+    
+    # Add frontmatter
+    output_parts.append(generate_yaml_frontmatter(metadata, tags))
+    
+    # Add title
+    output_parts.append(f"# {title}\n\n")
+    
+    # Generate summary if requested
+    if enable_summary and DEPENDENCIES["openai"]:
+        logger.info(f"Generating summary for URL: {url}")
+        summary = generate_summary(content, model, max_length)
+        output_parts.append(summary)
+    
+    # Add content
+    output_parts.append(content)
+    
+    # Write to output file
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(output_parts))
+    
+    logger.info(f"URL content written to {output_file}")
+    return 0
+
+
 def main() -> int:
     """Main function."""
     args = parse_arguments()
@@ -429,14 +564,21 @@ def main() -> int:
         else:
             args.summary = False
     
-    # Find files to process
-    files_by_ext = find_files()
-    if sum(len(files) for files in files_by_ext.values()) == 0:
-        logger.error("No supported files found in the current directory.")
-        return 1
-    
     # Parse metadata
     metadata = parse_metadata(args.metadata)
+    
+    # If a URL is provided, process it and exit
+    if args.url:
+        return process_url_to_markdown(
+            args.url, args.output, metadata, args.tags, 
+            args.summary, args.model, args.length
+        )
+    
+    # Otherwise, find files to process
+    files_by_ext = find_files(args.input_dir)
+    if sum(len(files) for files in files_by_ext.values()) == 0:
+        logger.error(f"No supported files found in directory: {args.input_dir}")
+        return 1
     
     # Start generating output
     output_parts = []
