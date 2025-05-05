@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""
+Document Processing Pipeline
+
+Process different file formats in the current directory,
+convert them to Markdown, and combine them into a single output file.
+"""
+
+import argparse
+import datetime
+import glob
+import logging
+import os
+import sys
+import time
+from typing import Dict, List, Optional, Tuple, Any
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+# Try importing optional dependencies
+DEPENDENCIES = {
+    "pdf": False,
+    "docx": False,
+    "html": False,
+    "csv": False,
+    "openai": False
+}
+
+try:
+    import pdfplumber
+    DEPENDENCIES["pdf"] = True
+except ImportError:
+    logger.warning("pdfplumber not installed. PDF processing will be limited.")
+
+try:
+    from docx import Document
+    DEPENDENCIES["docx"] = True
+except ImportError:
+    logger.warning("python-docx not installed. DOCX processing will be limited.")
+
+try:
+    from markdownify import markdownify as md
+    from bs4 import BeautifulSoup
+    DEPENDENCIES["html"] = True
+except ImportError:
+    logger.warning("markdownify/bs4 not installed. HTML processing will be limited.")
+
+try:
+    import pandas as pd
+    DEPENDENCIES["csv"] = True
+except ImportError:
+    logger.warning("pandas not installed. CSV processing will be limited.")
+
+try:
+    import openai
+    DEPENDENCIES["openai"] = True
+except ImportError:
+    logger.warning("openai not installed. Summary generation will be disabled.")
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Process documents and convert them to a combined Markdown file."
+    )
+    parser.add_argument(
+        "--metadata",
+        nargs="+",
+        help="Metadata as key=value pairs (e.g., --metadata author='Jane Doe' date='2023-01-01')"
+    )
+    parser.add_argument(
+        "--tags",
+        nargs="+",
+        help="Tags to include in the document (e.g., --tags research documentation)"
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Generate summaries using OpenAI"
+    )
+    parser.add_argument(
+        "--model",
+        default="gpt-3.5-turbo",
+        help="OpenAI model to use for summarization (default: gpt-3.5-turbo)"
+    )
+    parser.add_argument(
+        "--length",
+        type=int,
+        default=150,
+        help="Maximum length of summaries in tokens (default: 150)"
+    )
+    parser.add_argument(
+        "--output",
+        default="combined_output.md",
+        help="Output filename (default: combined_output.md)"
+    )
+    return parser.parse_args()
+
+
+def find_files() -> Dict[str, List[str]]:
+    """
+    Find files in the current directory by extension.
+    
+    Returns:
+        Dict mapping file extensions to lists of matching filenames
+    """
+    extensions = {
+        "pdf": glob.glob("*.pdf"),
+        "docx": glob.glob("*.docx"),
+        "txt": glob.glob("*.txt"),
+        "html": glob.glob("*.html") + glob.glob("*.htm"),
+        "csv": glob.glob("*.csv")
+    }
+    
+    # Log what we found
+    total_files = sum(len(files) for files in extensions.values())
+    logger.info(f"Found {total_files} files to process")
+    for ext, files in extensions.items():
+        if files:
+            logger.info(f"  {len(files)} {ext.upper()} files")
+    
+    return extensions
+
+
+def convert_pdf(filepath: str) -> str:
+    """
+    Convert PDF file to Markdown.
+    
+    Args:
+        filepath: Path to the PDF file
+        
+    Returns:
+        Markdown string representation
+    """
+    if not DEPENDENCIES["pdf"]:
+        return f"*Error: Could not process PDF file. Please install pdfplumber.*\n\n"
+    
+    try:
+        markdown_content = []
+        with pdfplumber.open(filepath) as pdf:
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    markdown_content.append(f"### Page {i+1}\n\n{text}\n\n")
+                else:
+                    markdown_content.append(f"### Page {i+1}\n\n*No extractable text on this page*\n\n")
+        
+        return "\n".join(markdown_content)
+    except Exception as e:
+        logger.error(f"Error processing PDF file {filepath}: {str(e)}")
+        return f"*Error: Failed to process PDF file: {str(e)}*\n\n"
+
+
+def convert_docx(filepath: str) -> str:
+    """
+    Convert DOCX file to Markdown.
+    
+    Args:
+        filepath: Path to the DOCX file
+        
+    Returns:
+        Markdown string representation
+    """
+    if not DEPENDENCIES["docx"]:
+        return f"*Error: Could not process DOCX file. Please install python-docx.*\n\n"
+    
+    try:
+        doc = Document(filepath)
+        content = []
+        
+        for para in doc.paragraphs:
+            if para.text.strip():
+                # Check if it's a heading
+                if para.style.name.startswith('Heading'):
+                    level = int(para.style.name[-1])
+                    content.append(f"{'#' * level} {para.text}\n\n")
+                else:
+                    text = para.text
+                    # Basic formatting
+                    if para.style.name == 'List Bullet':
+                        text = f"* {text}"
+                    elif para.style.name == 'List Number':
+                        text = f"1. {text}"
+                    content.append(f"{text}\n\n")
+        
+        # Process tables
+        for table in doc.tables:
+            table_rows = []
+            # Header row
+            header = " | ".join(cell.text for cell in table.rows[0].cells)
+            separator = "|" + "---|" * len(table.rows[0].cells)
+            table_rows.append(f"| {header} |")
+            table_rows.append(separator)
+            
+            # Data rows
+            for row in table.rows[1:]:
+                row_data = " | ".join(cell.text for cell in row.cells)
+                table_rows.append(f"| {row_data} |")
+            
+            content.append("\n".join(table_rows) + "\n\n")
+        
+        return "\n".join(content)
+    except Exception as e:
+        logger.error(f"Error processing DOCX file {filepath}: {str(e)}")
+        return f"*Error: Failed to process DOCX file: {str(e)}*\n\n"
+
+
+def convert_txt(filepath: str) -> str:
+    """
+    Convert TXT file to Markdown (minimal conversion needed).
+    
+    Args:
+        filepath: Path to the TXT file
+        
+    Returns:
+        Markdown string representation
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        return content + "\n\n"
+    except Exception as e:
+        logger.error(f"Error processing TXT file {filepath}: {str(e)}")
+        return f"*Error: Failed to process TXT file: {str(e)}*\n\n"
+
+
+def convert_html(filepath: str) -> str:
+    """
+    Convert HTML file to Markdown.
+    
+    Args:
+        filepath: Path to the HTML file
+        
+    Returns:
+        Markdown string representation
+    """
+    if not DEPENDENCIES["html"]:
+        return f"*Error: Could not process HTML file. Please install markdownify and beautifulsoup4.*\n\n"
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            html_content = f.read()
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.extract()
+        
+        # Convert to markdown
+        markdown_content = md(str(soup))
+        return markdown_content + "\n\n"
+    except Exception as e:
+        logger.error(f"Error processing HTML file {filepath}: {str(e)}")
+        return f"*Error: Failed to process HTML file: {str(e)}*\n\n"
+
+
+def convert_csv(filepath: str) -> str:
+    """
+    Convert CSV file to Markdown table.
+    
+    Args:
+        filepath: Path to the CSV file
+        
+    Returns:
+        Markdown string representation
+    """
+    if not DEPENDENCIES["csv"]:
+        return f"*Error: Could not process CSV file. Please install pandas.*\n\n"
+    
+    try:
+        df = pd.read_csv(filepath)
+        return df.to_markdown(index=False) + "\n\n"
+    except Exception as e:
+        logger.error(f"Error processing CSV file {filepath}: {str(e)}")
+        return f"*Error: Failed to process CSV file: {str(e)}*\n\n"
+
+
+def generate_summary(text: str, model: str, max_length: int) -> str:
+    """
+    Generate a summary of the text using OpenAI API.
+    
+    Args:
+        text: Text to summarize
+        model: OpenAI model to use
+        max_length: Maximum length of summary in tokens
+        
+    Returns:
+        Generated summary
+    """
+    if not DEPENDENCIES["openai"]:
+        return "*Summary generation skipped: OpenAI package not installed*\n\n"
+    
+    # Truncate text if too long (OpenAI has token limits)
+    max_chars = 6000  # Approximate token to character ratio
+    if len(text) > max_chars:
+        text = text[:max_chars] + "..."
+    
+    try:
+        response = openai.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": f"Summarize the following text in {max_length} tokens or less:"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=max_length
+        )
+        
+        summary = response.choices[0].message.content.strip()
+        return f"**Summary:** {summary}\n\n"
+    except Exception as e:
+        logger.error(f"Error generating summary: {str(e)}")
+        return f"*Summary generation failed: {str(e)}*\n\n"
+
+
+def process_file(filepath: str, file_ext: str, enable_summary: bool, model: str, max_length: int) -> Tuple[str, str]:
+    """
+    Process a single file based on its extension.
+    
+    Args:
+        filepath: Path to the file
+        file_ext: File extension (without the dot)
+        enable_summary: Whether to generate a summary
+        model: OpenAI model to use for summarization
+        max_length: Maximum summary length
+        
+    Returns:
+        Tuple of (content, summary)
+    """
+    logger.info(f"Processing: {filepath}")
+    
+    # Convert based on file type
+    if file_ext == "pdf":
+        content = convert_pdf(filepath)
+    elif file_ext == "docx":
+        content = convert_docx(filepath)
+    elif file_ext == "txt":
+        content = convert_txt(filepath)
+    elif file_ext == "html" or file_ext == "htm":
+        content = convert_html(filepath)
+    elif file_ext == "csv":
+        content = convert_csv(filepath)
+    else:
+        content = f"*Unsupported file type: {file_ext}*\n\n"
+    
+    # Generate summary if requested
+    summary = ""
+    if enable_summary and content and not content.startswith("*Error:"):
+        logger.info(f"Generating summary for: {filepath}")
+        # Add rate limiting to avoid API throttling
+        time.sleep(1)
+        summary = generate_summary(content, model, max_length)
+    
+    return content, summary
+
+
+def parse_metadata(metadata_args: Optional[List[str]]) -> Dict[str, str]:
+    """
+    Parse metadata arguments from command line.
+    
+    Args:
+        metadata_args: List of key=value strings
+        
+    Returns:
+        Dictionary of metadata
+    """
+    metadata = {}
+    if metadata_args:
+        for item in metadata_args:
+            if "=" in item:
+                key, value = item.split("=", 1)
+                metadata[key.strip()] = value.strip()
+            else:
+                logger.warning(f"Ignoring invalid metadata format: {item}")
+    
+    # Add automatic metadata
+    metadata["processing_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
+    metadata["processor"] = "Document Processing Pipeline"
+    
+    return metadata
+
+
+def generate_yaml_frontmatter(metadata: Dict[str, str], tags: Optional[List[str]]) -> str:
+    """
+    Generate YAML frontmatter from metadata and tags.
+    
+    Args:
+        metadata: Dictionary of metadata
+        tags: List of tags
+        
+    Returns:
+        YAML frontmatter string
+    """
+    frontmatter = ["---"]
+    
+    # Add metadata
+    for key, value in metadata.items():
+        frontmatter.append(f"{key}: {value}")
+    
+    # Add tags if provided
+    if tags and len(tags) > 0:
+        frontmatter.append("tags:")
+        for tag in tags:
+            frontmatter.append(f"  - {tag}")
+    
+    frontmatter.append("---")
+    return "\n".join(frontmatter) + "\n\n"
+
+
+def main() -> int:
+    """Main function."""
+    args = parse_arguments()
+    
+    # Set OpenAI API key if summary is enabled
+    if args.summary:
+        if DEPENDENCIES["openai"]:
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if not openai_key:
+                logger.error("OPENAI_API_KEY environment variable not set. Summaries will be disabled.")
+                args.summary = False
+            else:
+                openai.api_key = openai_key
+                logger.info(f"Using OpenAI model: {args.model}")
+        else:
+            args.summary = False
+    
+    # Find files to process
+    files_by_ext = find_files()
+    if sum(len(files) for files in files_by_ext.values()) == 0:
+        logger.error("No supported files found in the current directory.")
+        return 1
+    
+    # Parse metadata
+    metadata = parse_metadata(args.metadata)
+    
+    # Start generating output
+    output_parts = []
+    
+    # Add frontmatter
+    output_parts.append(generate_yaml_frontmatter(metadata, args.tags))
+    
+    # Add title
+    output_parts.append("# Combined Document Output\n\n")
+    
+    # Process each file type
+    all_files = []
+    for ext, files in files_by_ext.items():
+        for file in files:
+            all_files.append((file, ext))
+    
+    # Sort by filename
+    all_files.sort(key=lambda x: x[0])
+    
+    # Process each file
+    for filepath, ext in all_files:
+        # Add section header
+        output_parts.append(f"## {os.path.basename(filepath)}\n\n")
+        
+        # Process file
+        content, summary = process_file(
+            filepath, ext, args.summary, args.model, args.length
+        )
+        
+        # Add summary if generated
+        if summary:
+            output_parts.append(summary)
+        
+        # Add content
+        output_parts.append(content)
+        
+        # Add separator
+        output_parts.append("---\n\n")
+    
+    # Write to output file
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write("\n".join(output_parts))
+    
+    logger.info(f"Output written to {args.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
