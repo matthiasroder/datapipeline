@@ -77,6 +77,29 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Process documents and convert them to a combined Markdown file."
     )
+
+    # Add optional positional argument for input file
+    parser.add_argument(
+        "input_path",
+        nargs="?",
+        help="Path to a file or directory to process"
+    )
+
+    # Create a mutually exclusive group for input sources (only used if no positional argument)
+    input_group = parser.add_mutually_exclusive_group(required=False)
+    input_group.add_argument(
+        "--file",
+        help="Single file to process"
+    )
+    input_group.add_argument(
+        "--directory",
+        help="Directory containing files to process"
+    )
+    input_group.add_argument(
+        "--url",
+        help="URL to download and convert to Markdown"
+    )
+
     parser.add_argument(
         "--metadata",
         nargs="+",
@@ -105,18 +128,9 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="combined_output.md",
-        help="Output filename (default: combined_output.md)"
+        help="Output filename (defaults to input filename with .md extension for files, or combined_output.md for directories)"
     )
-    parser.add_argument(
-        "--input-dir",
-        default=".",
-        help="Directory containing files to process (default: current directory)"
-    )
-    parser.add_argument(
-        "--url",
-        help="URL to download and convert to Markdown"
-    )
+
     return parser.parse_args()
 
 
@@ -550,7 +564,7 @@ def process_url_to_markdown(url: str, output_file: str, metadata: Dict[str, str]
 def main() -> int:
     """Main function."""
     args = parse_arguments()
-    
+
     # Set OpenAI API key if summary is enabled
     if args.summary:
         if DEPENDENCIES["openai"]:
@@ -563,67 +577,246 @@ def main() -> int:
                 logger.info(f"Using OpenAI model: {args.model}")
         else:
             args.summary = False
-    
+
     # Parse metadata
     metadata = parse_metadata(args.metadata)
-    
+
+    # Process positional argument if provided
+    if args.input_path:
+        # Determine if it's a file or directory
+        if os.path.isfile(args.input_path):
+            # It's a file, process it as such
+            file_path = args.input_path
+
+            # Determine output filename
+            output_file = args.output
+            if not output_file:
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                output_file = f"{base_name}.md"
+                logger.info(f"Output filename not specified, using: {output_file}")
+
+            file_ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+
+            # Check if file extension is supported
+            if file_ext not in ["pdf", "docx", "txt", "html", "htm", "csv"]:
+                logger.error(f"Unsupported file type: {file_ext}")
+                return 1
+
+            # Process the single file
+            logger.info(f"Processing single file: {file_path}")
+
+            # Start generating output
+            output_parts = []
+
+            # Add frontmatter
+            output_parts.append(generate_yaml_frontmatter(metadata, args.tags))
+
+            # Add title
+            output_parts.append(f"# {os.path.basename(file_path)}\n\n")
+
+            # Process file
+            content, summary = process_file(
+                file_path, file_ext, args.summary, args.model, args.length
+            )
+
+            # Add summary if generated
+            if summary:
+                output_parts.append(summary)
+
+            # Add content
+            output_parts.append(content)
+
+            # Write to output file
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(output_parts))
+
+            logger.info(f"Output written to {output_file}")
+            return 0
+
+        elif os.path.isdir(args.input_path):
+            # It's a directory
+            directory_path = args.input_path
+
+            # Determine output filename
+            output_file = args.output
+            if not output_file:
+                output_file = "combined_output.md"
+                logger.info(f"Output filename not specified, using: {output_file}")
+
+            # Process the directory
+            files_by_ext = find_files(directory_path)
+            if sum(len(files) for files in files_by_ext.values()) == 0:
+                logger.error(f"No supported files found in directory: {directory_path}")
+                return 1
+
+            # Rest of directory processing as usual
+            # Start generating output
+            output_parts = []
+
+            # Add frontmatter
+            output_parts.append(generate_yaml_frontmatter(metadata, args.tags))
+
+            # Add title
+            output_parts.append("# Combined Document Output\n\n")
+
+            # Process each file type
+            all_files = []
+            for ext, files in files_by_ext.items():
+                for file in files:
+                    all_files.append((file, ext))
+
+            # Sort by filename
+            all_files.sort(key=lambda x: x[0])
+
+            # Process each file
+            for filepath, ext in all_files:
+                # Add section header
+                output_parts.append(f"## {os.path.basename(filepath)}\n\n")
+
+                # Process file
+                content, summary = process_file(
+                    filepath, ext, args.summary, args.model, args.length
+                )
+
+                # Add summary if generated
+                if summary:
+                    output_parts.append(summary)
+
+                # Add content
+                output_parts.append(content)
+
+                # Add separator
+                output_parts.append("---\n\n")
+
+            # Write to output file
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(output_parts))
+
+            logger.info(f"Output written to {output_file}")
+            return 0
+        else:
+            logger.error(f"Input path does not exist: {args.input_path}")
+            return 1
+
+    # Determine output filename based on input type for flag-based input
+    output_file = args.output
+    if not output_file:
+        if args.file:
+            # For a single file, use the same filename but with .md extension
+            base_name = os.path.splitext(os.path.basename(args.file))[0]
+            output_file = f"{base_name}.md"
+        else:
+            # For directory or URL, use the default combined output
+            output_file = "combined_output.md"
+        logger.info(f"Output filename not specified, using: {output_file}")
+
     # If a URL is provided, process it and exit
     if args.url:
         return process_url_to_markdown(
-            args.url, args.output, metadata, args.tags, 
+            args.url, output_file, metadata, args.tags,
             args.summary, args.model, args.length
         )
-    
-    # Otherwise, find files to process
-    files_by_ext = find_files(args.input_dir)
-    if sum(len(files) for files in files_by_ext.values()) == 0:
-        logger.error(f"No supported files found in directory: {args.input_dir}")
-        return 1
-    
-    # Start generating output
-    output_parts = []
-    
-    # Add frontmatter
-    output_parts.append(generate_yaml_frontmatter(metadata, args.tags))
-    
-    # Add title
-    output_parts.append("# Combined Document Output\n\n")
-    
-    # Process each file type
-    all_files = []
-    for ext, files in files_by_ext.items():
-        for file in files:
-            all_files.append((file, ext))
-    
-    # Sort by filename
-    all_files.sort(key=lambda x: x[0])
-    
-    # Process each file
-    for filepath, ext in all_files:
-        # Add section header
-        output_parts.append(f"## {os.path.basename(filepath)}\n\n")
-        
+
+    # If a single file is provided, process it
+    if args.file:
+        if not os.path.isfile(args.file):
+            logger.error(f"Input file does not exist: {args.file}")
+            return 1
+
+        file_path = args.file
+        file_ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+
+        # Check if file extension is supported
+        if file_ext not in ["pdf", "docx", "txt", "html", "htm", "csv"]:
+            logger.error(f"Unsupported file type: {file_ext}")
+            return 1
+
+        # Process the single file
+        logger.info(f"Processing single file: {file_path}")
+
+        # Start generating output
+        output_parts = []
+
+        # Add frontmatter
+        output_parts.append(generate_yaml_frontmatter(metadata, args.tags))
+
+        # Add title
+        output_parts.append(f"# {os.path.basename(file_path)}\n\n")
+
         # Process file
         content, summary = process_file(
-            filepath, ext, args.summary, args.model, args.length
+            file_path, file_ext, args.summary, args.model, args.length
         )
-        
+
         # Add summary if generated
         if summary:
             output_parts.append(summary)
-        
+
         # Add content
         output_parts.append(content)
-        
-        # Add separator
-        output_parts.append("---\n\n")
-    
-    # Write to output file
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write("\n".join(output_parts))
-    
-    logger.info(f"Output written to {args.output}")
-    return 0
+
+        # Write to output file
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(output_parts))
+
+        logger.info(f"Output written to {output_file}")
+        return 0
+
+    # Otherwise, process files from directory
+    if args.directory:
+        files_by_ext = find_files(args.directory)
+        if sum(len(files) for files in files_by_ext.values()) == 0:
+            logger.error(f"No supported files found in directory: {args.directory}")
+            return 1
+
+        # Start generating output
+        output_parts = []
+
+        # Add frontmatter
+        output_parts.append(generate_yaml_frontmatter(metadata, args.tags))
+
+        # Add title
+        output_parts.append("# Combined Document Output\n\n")
+
+        # Process each file type
+        all_files = []
+        for ext, files in files_by_ext.items():
+            for file in files:
+                all_files.append((file, ext))
+
+        # Sort by filename
+        all_files.sort(key=lambda x: x[0])
+
+        # Process each file
+        for filepath, ext in all_files:
+            # Add section header
+            output_parts.append(f"## {os.path.basename(filepath)}\n\n")
+
+            # Process file
+            content, summary = process_file(
+                filepath, ext, args.summary, args.model, args.length
+            )
+
+            # Add summary if generated
+            if summary:
+                output_parts.append(summary)
+
+            # Add content
+            output_parts.append(content)
+
+            # Add separator
+            output_parts.append("---\n\n")
+
+        # Write to output file
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(output_parts))
+
+        logger.info(f"Output written to {output_file}")
+        return 0
+
+    # If we get here, no input source was provided
+    logger.error("No input source provided. Please specify a file, directory, or URL.")
+    return 1
 
 
 if __name__ == "__main__":

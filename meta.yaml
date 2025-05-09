@@ -1,0 +1,40 @@
+{% set name = "datapipeline" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: .
+
+build:
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv
+  entry_points:
+    - pipeline = pipeline:main
+
+requirements:
+  host:
+    - python
+    - pip
+    - setuptools
+  run:
+    - python
+    - pdfplumber >=0.7.0
+    - python-docx >=0.8.11
+    - beautifulsoup4 >=4.11.1
+    - markdownify >=0.11.0
+    - pandas >=1.5.0
+    - openai >=1.0.0
+    - requests >=2.28.0
+
+about:
+  home: https://github.com/yourusername/datapipeline
+  summary: Document Processing Pipeline
+  license: MIT
+  license_file: LICENSE
+
+extra:
+  recipe-maintainers:
+    - yourusername
