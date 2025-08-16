@@ -149,7 +149,7 @@ def find_files(input_dir: str = ".") -> Dict[str, List[str]]:
     
     if not os.path.isdir(input_dir):
         logger.error(f"Input directory does not exist: {input_dir}")
-        return {ext: [] for ext in ["pdf", "docx", "txt", "html", "csv"]}
+        return {ext: [] for ext in ["pdf", "docx", "txt", "html", "csv", "md"]}
     
     logger.info(f"Searching for files in: {input_dir}")
     
@@ -159,7 +159,8 @@ def find_files(input_dir: str = ".") -> Dict[str, List[str]]:
         "docx": glob.glob(os.path.join(input_dir, "*.docx")),
         "txt": glob.glob(os.path.join(input_dir, "*.txt")),
         "html": glob.glob(os.path.join(input_dir, "*.html")) + glob.glob(os.path.join(input_dir, "*.htm")),
-        "csv": glob.glob(os.path.join(input_dir, "*.csv"))
+        "csv": glob.glob(os.path.join(input_dir, "*.csv")),
+        "md": glob.glob(os.path.join(input_dir, "*.md"))
     }
     
     # Log what we found
@@ -325,6 +326,25 @@ def convert_csv(filepath: str) -> str:
         return f"*Error: Failed to process CSV file: {str(e)}*\n\n"
 
 
+def convert_md(filepath: str) -> str:
+    """
+    Process Markdown file (already in target format).
+    
+    Args:
+        filepath: Path to the Markdown file
+        
+    Returns:
+        Markdown string representation
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        return content + "\n\n"
+    except Exception as e:
+        logger.error(f"Error processing Markdown file {filepath}: {str(e)}")
+        return f"*Error: Failed to process Markdown file: {str(e)}*\n\n"
+
+
 def fetch_url(url: str) -> Tuple[str, str]:
     """
     Fetch content from a URL and convert it to markdown.
@@ -439,6 +459,8 @@ def process_file(filepath: str, file_ext: str, enable_summary: bool, model: str,
         content = convert_html(filepath)
     elif file_ext == "csv":
         content = convert_csv(filepath)
+    elif file_ext == "md":
+        content = convert_md(filepath)
     else:
         content = f"*Unsupported file type: {file_ext}*\n\n"
     
@@ -598,7 +620,7 @@ def main() -> int:
             file_ext = os.path.splitext(file_path)[1].lower().lstrip('.')
 
             # Check if file extension is supported
-            if file_ext not in ["pdf", "docx", "txt", "html", "htm", "csv"]:
+            if file_ext not in ["pdf", "docx", "txt", "html", "htm", "csv", "md"]:
                 logger.error(f"Unsupported file type: {file_ext}")
                 return 1
 
@@ -727,7 +749,7 @@ def main() -> int:
         file_ext = os.path.splitext(file_path)[1].lower().lstrip('.')
 
         # Check if file extension is supported
-        if file_ext not in ["pdf", "docx", "txt", "html", "htm", "csv"]:
+        if file_ext not in ["pdf", "docx", "txt", "html", "htm", "csv", "md"]:
             logger.error(f"Unsupported file type: {file_ext}")
             return 1
 
